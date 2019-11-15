@@ -5,6 +5,7 @@ import android.media.*
 import android.os.Bundle
 import android.view.View
 import android.widget.ArrayAdapter
+import android.widget.Spinner
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -24,45 +25,26 @@ class MainActivity : AppCompatActivity() {
     private fun initUi() {
         btnAskPermission.setOnClickListener(::onAskPermissionClick)
 
-        val audioSourcesAdapter = ArrayAdapter<String>(
-            this,
-            android.R.layout.simple_spinner_item,
-            AudioSources.stringValues()
+        spnAudioSource.setupSpinnerAdapter(
+            data = AudioSources.stringValues(),
+            defaultPosition = AudioSources.MIC.ordinal
         )
-        spnAudioSource.adapter = audioSourcesAdapter
-        spnAudioSource.setSelection(AudioSources.MIC.ordinal)
-
-        val audioFormatsAdapter = ArrayAdapter<String>(
-            this,
-            android.R.layout.simple_spinner_item,
-            AudioFormats.stringValues()
+        spnAudioFormat.setupSpinnerAdapter(
+            data = AudioFormats.stringValues(),
+            defaultPosition = AudioFormats.ENCODING_PCM_16BIT.ordinal
         )
-        spnAudioFormat.adapter = audioFormatsAdapter
-        spnAudioFormat.setSelection(AudioFormats.ENCODING_PCM_16BIT.ordinal)
-
-        val audioOutChannelsAdapter = ArrayAdapter<String>(
-            this,
-            android.R.layout.simple_spinner_item,
-            AudioOutChannels.stringValues()
+        spnAudioInChannel.setupSpinnerAdapter(
+            data = AudioInChannels.stringValues(),
+            defaultPosition = AudioInChannels.CHANNEL_IN_STEREO.ordinal
         )
-        spnAudioOutChannel.adapter = audioOutChannelsAdapter
-        spnAudioOutChannel.setSelection(AudioOutChannels.CHANNEL_OUT_STEREO.ordinal)
-
-        val audioInChannelsAdapter = ArrayAdapter<String>(
-            this,
-            android.R.layout.simple_spinner_item,
-            AudioInChannels.stringValues()
+        spnAudioOutChannel.setupSpinnerAdapter(
+            data = AudioOutChannels.stringValues(),
+            defaultPosition = AudioOutChannels.CHANNEL_OUT_STEREO.ordinal
         )
-        spnAudioInChannel.adapter = audioInChannelsAdapter
-        spnAudioInChannel.setSelection(AudioInChannels.CHANNEL_IN_STEREO.ordinal)
-
-        val streamTypesAdapter = ArrayAdapter<String>(
-            this,
-            android.R.layout.simple_spinner_item,
-            StreamTypes.stringValues()
+        spnStreamType.setupSpinnerAdapter(
+            data = StreamTypes.stringValues(),
+            defaultPosition = StreamTypes.STREAM_MUSIC.ordinal
         )
-        spnStreamType.adapter = streamTypesAdapter
-        spnStreamType.setSelection(StreamTypes.STREAM_MUSIC.ordinal)
 
         tbtnRecord.setOnCheckedChangeListener(::ontRecordToggleChange)
     }
@@ -80,41 +62,50 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun Spinner.setupSpinnerAdapter(
+        data: List<String>,
+        defaultPosition: Int
+    ) {
+        adapter =
+            ArrayAdapter<String>(this@MainActivity, android.R.layout.simple_spinner_item, data)
+        setSelection(defaultPosition)
+    }
+
     private var recordJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
     private fun ontRecordToggleChange(view: View, isChecked: Boolean) {
-        if (isChecked) {
-            recordJob = scope.launch {
-                try {
-                    record()
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        tbtnRecord.isChecked = false
-                        Toast.makeText(applicationContext, e.message ?: "", Toast.LENGTH_LONG)
-                            .show()
+        runBlocking {
+            if (isChecked) {
+                recordJob = scope.launch {
+                    try {
+                        record()
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            tbtnRecord.isChecked = false
+                            Toast.makeText(applicationContext, e.message ?: "", Toast.LENGTH_LONG)
+                                .show()
+                        }
                     }
                 }
+            } else {
+                recordJob?.cancelAndJoin()
             }
-        } else {
-            recordJob?.cancel()
         }
     }
 
     private suspend fun record() {
-        var isFirstPacket = true
-
-        val audioSource = AudioSources.values()[spnAudioSource.selectedItemPosition]
-        val audioFormat = AudioFormats.values()[spnAudioFormat.selectedItemPosition]
-        val streamType = StreamTypes.values()[spnStreamType.selectedItemPosition]
+        val audioSource = AudioSources.getValueByPosition(spnAudioSource.selectedItemPosition)
+        val audioFormat = AudioFormats.getValueByPosition(spnAudioFormat.selectedItemPosition)
+        val streamType = StreamTypes.getValueByPosition(spnStreamType.selectedItemPosition)
         val audioOutChannel =
-            AudioOutChannels.values()[spnAudioOutChannel.selectedItemPosition]
+            AudioOutChannels.getValueByPosition(spnAudioOutChannel.selectedItemPosition)
         val audioInChannel =
-            AudioInChannels.values()[spnAudioInChannel.selectedItemPosition]
+            AudioInChannels.getValueByPosition(spnAudioInChannel.selectedItemPosition)
 
         val sampleRate = AudioTrack.getNativeOutputSampleRate(streamType.value)
 
-        val bufferSize = getMinBufferSize(sampleRate, audioOutChannel, audioFormat)
+        val bufferSize = Utils.getMinBufferSize(sampleRate, audioOutChannel, audioFormat)
 
         val audioTrack = AudioTrack(
             streamType.value,
@@ -136,27 +127,16 @@ class MainActivity : AppCompatActivity() {
         recorder.startRecording()
         audioTrack.play()
 
-        val inBuf = ByteArray(FRAME_SIZE)
+        val inputBuffer = ByteArray(FRAME_SIZE)
 
         try {
             while (recordJob?.isCancelled != true) {
-                // Encoder must be fed entire frames.
-                var toRead = inBuf.size
-                var offset = 0
-                while (toRead > 0) {
-                    val read = recorder.read(inBuf, offset, FRAME_SIZE)
-                    if (read < 0) {
-                        throw RuntimeException("recorder.read() returned error $read")
-                    }
-                    toRead -= read
-                    offset += read
+                val numberOfBytes = recorder.read(inputBuffer, 0, FRAME_SIZE)
+                if (numberOfBytes < 0) {
+                    throw RuntimeException("Unable to read AudioRecorder.")
                 }
 
-                if (isFirstPacket) {
-                    isFirstPacket = false
-                    delay(100)
-                }
-                audioTrack.write(inBuf, 0, FRAME_SIZE)
+                audioTrack.write(inputBuffer, 0, numberOfBytes)
             }
         } finally {
             recorder.stop()
@@ -164,33 +144,6 @@ class MainActivity : AppCompatActivity() {
             audioTrack.stop()
             audioTrack.release()
         }
-    }
-
-    private fun getMinBufferSize(
-        sampleRateInHz: Int,
-        channelConfig: AudioOutChannels,
-        audioFormat: AudioFormats
-    ): Int {
-        val bufferSize =
-            AudioTrack.getMinBufferSize(sampleRateInHz, channelConfig.value, audioFormat.value)
-
-        if (bufferSize < 0) {
-            val errorMessage = when (bufferSize) {
-                AudioTrack.ERROR -> "Denotes a generic operation failure."
-                AudioTrack.ERROR_BAD_VALUE -> "Denotes a failure due to the use of an invalid value."
-                AudioTrack.ERROR_DEAD_OBJECT -> "An error code indicating that the object reporting it is no longer valid and needs to be recreated."
-                else -> "Unable to get Audio Track min buffer size"
-            }
-
-            throw Exception(
-                "$errorMessage\n" +
-                        "sampleRateInHz = $sampleRateInHz\n" +
-                        "channelConfig = $channelConfig\n" +
-                        "audioFormat = $audioFormat}"
-            )
-        }
-
-        return bufferSize
     }
 
     enum class AudioSources(val value: Int) {
@@ -207,8 +160,8 @@ class MainActivity : AppCompatActivity() {
         VOICE_PERFORMANCE(MediaRecorder.AudioSource.VOICE_PERFORMANCE);
 
         companion object {
-            fun getValueByPosition(position: Int): Int {
-                return values()[position].value
+            fun getValueByPosition(position: Int): AudioSources {
+                return values()[position]
             }
 
             fun stringValues(): List<String> {
@@ -239,8 +192,8 @@ class MainActivity : AppCompatActivity() {
         ENCODING_DOLBY_MAT(AudioFormat.ENCODING_DOLBY_MAT);
 
         companion object {
-            fun getValueByPosition(position: Int): Int {
-                return values()[position].value
+            fun getValueByPosition(position: Int): AudioFormats {
+                return values()[position]
             }
 
             fun stringValues(): List<String> {
@@ -271,8 +224,8 @@ class MainActivity : AppCompatActivity() {
         CHANNEL_OUT_7POINT1_SURROUND(AudioFormat.CHANNEL_OUT_7POINT1_SURROUND);
 
         companion object {
-            fun getValueByPosition(position: Int): Int {
-                return values()[position].value
+            fun getValueByPosition(position: Int): AudioOutChannels {
+                return values()[position]
             }
 
             fun stringValues(): List<String> {
@@ -301,8 +254,8 @@ class MainActivity : AppCompatActivity() {
         CHANNEL_IN_STEREO(AudioFormat.CHANNEL_IN_STEREO);
 
         companion object {
-            fun getValueByPosition(position: Int): Int {
-                return values()[position].value
+            fun getValueByPosition(position: Int): AudioInChannels {
+                return values()[position]
             }
 
             fun stringValues(): List<String> {
@@ -322,8 +275,8 @@ class MainActivity : AppCompatActivity() {
         STREAM_DTMF(AudioManager.STREAM_DTMF);
 
         companion object {
-            fun getValueByPosition(position: Int): Int {
-                return values()[position].value
+            fun getValueByPosition(position: Int): StreamTypes {
+                return values()[position]
             }
 
             fun stringValues(): List<String> {
